@@ -1,0 +1,10 @@
+# Windows system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# VS Code environment tracking folders
+.vscode/
+
+# Ignore any runtime log dumps if stored locally
+*.log
