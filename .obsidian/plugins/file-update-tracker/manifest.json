@@ -1,0 +1,9 @@
+{
+  "id": "file-update-tracker",
+  "name": "File Update Tracker",
+  "version": "1.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Records one modification timestamp per Markdown file per calendar day.",
+  "author": "Boss",
+  "isDesktopOnly": false
+}

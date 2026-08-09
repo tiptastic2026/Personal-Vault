@@ -2,10 +2,10 @@
 date_created: 2026-06-19
 type: video
 tags:
-  - #type/video
-  - #domain/theology
-  - #catholic
-status: #status/active
+  - 
+  - 
+  - 
+status:
 people_referenced:
   - "[[Fr. Joseph Iannuzzi]]"
   - "[[St. Paul]]"
@@ -20,14 +20,14 @@ people_referenced:
   - "[[St. Cyril of Jerusalem]]"
   - "[[St. Mother Teresa of Kolkata]]"
   - "[[St. Pope John Paul II]]"
-
 concepts:
   - "[[End Times]]"
   - "[[Divine Will]]"
   - "[[Era of Peace]]"
-
 url: https://www.youtube.com/watch?v=E66mLa9ZP8o
 video_length: 32:54
+updated:
+  - 2026-08-08 20:25
 ---
 
 # We are in the end of time prophesied by the Blessed Mother

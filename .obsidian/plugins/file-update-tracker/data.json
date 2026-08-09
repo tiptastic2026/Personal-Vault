@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "excludedFolders": [
+    "99 System"
+  ]
+}

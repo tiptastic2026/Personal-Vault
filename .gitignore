@@ -6,5 +6,8 @@ Desktop.ini
 # VS Code environment tracking folders
 .vscode/
 
+# Obsidian workspace layout and state tracking
+.obsidian/workspace.json
+
 # Ignore any runtime log dumps if stored locally
 *.log
