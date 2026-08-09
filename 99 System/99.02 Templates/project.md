@@ -148,7 +148,9 @@ General project notes that do not belong in another section.
 
 Record significant project activity, decisions, changes and discoveries chronologically.
 
-### <% tp.date.now("YYYY-MM-DD") %>
+Every entry must begin with `YYYY-MM-DD`. Newest entries first.
+
+YYYY-MM-DD — DESC TEXT HERE
 
 ## Completion
 
