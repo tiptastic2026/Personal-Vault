@@ -28,16 +28,28 @@ tR += `<< [[05_Journal/05.1_Daily/${yesterdayDate.format("YYYY-MM-DD")}|Yesterda
 # <% moment(dateStr, "YYYY-MM-DD").format("YYYY-MM-DD ddd") %>
 
 ## Today's Focus
-- FocusOnToday
-- ReligiousFocus
+**Focus On Today**
+- TEXT
+
+**Religious Focus**
+- TEXT
 
 ## Daily Review
 
-- I'm proud that...
+**What was hard today:** 
+- TEXT
 
-- I'm grateful that...
+**What was good today:** 
+- TEXT
 
-- Top moments of today...
+**I'm proud that:** 
+- TEXT
+
+**I'm grateful that:** 
+- TEXT
+
+**Top moments of today:**
+- TEXT
 
 ## End of day checklist
 -
@@ -83,6 +95,25 @@ views:
 
 ## Journal / Log
 - WriteHere
+
+## Activity Log
+
+> **Activity Log — How to use**
+> - **Text:** Briefly describe what was done, decided, created, fixed, or discovered.
+> - **Time:** Optional. Use `[HH:MM]` when the time is useful; omit it otherwise.
+> - **category:** Classifies the activity (e.g. `System`, `Setup`, `Design`, `Development`, `Research`).
+> - **project:** Link the activity to an existing project. Omit for general/unassigned activity.
+> - **status:** Records the current state, normally `complete` for finished work.
+> - **Idea:** Use a nested `> *Idea:*` line when the activity identifies a possible future project or idea rather than completed project work.
+>
+> **Format:** `- [HH:MM] Description. [category:: Category] [project:: [[Project Name]]] [status:: complete]`
+>
+> Keep entries concise. Add the newest activity at the bottom of the log.
+
+EXAMPLE TEXT...
+- Started building the Activity Log system. [category:: System] [status:: complete] 
+  > *Idea:* Activity Log System
+- Created the first project note. [project:: [Daily Journal System](<Daily Journal System>)] [category:: Setup] [status:: complete]
 
 ## YouTube Videos Watched Today
 - 

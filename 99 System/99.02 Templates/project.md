@@ -152,6 +152,23 @@ Every entry must begin with `YYYY-MM-DD`. Newest entries first.
 
 YYYY-MM-DD — DESC TEXT HERE
 
+## Project Log
+
+Record significant project activity, decisions, changes and discoveries chronologically.
+
+Every entry must begin with `YYYY-MM-DD`. Newest entries first.
+
+YYYY-MM-DD — DESC TEXT HERE
+
+## Activity
+
+```dataview
+LIST
+FROM "_Journal/05.1_Daily"
+WHERE contains(file.outlinks, this.file.link)
+SORT file.name DESC
+```
+
 ## Completion
 
 ### Completion Criteria

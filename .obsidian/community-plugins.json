@@ -9,5 +9,8 @@
   "calendar",
   "ytkn",
   "youtube-transcript-fetcher",
-  "media-extended"
+  "media-extended",
+  "obsidian-style-settings",
+  "file-update-tracker",
+  "obsidian-git"
 ]
