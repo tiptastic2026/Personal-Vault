@@ -1,13 +1,22 @@
 # Windows system files
+
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
 # VS Code environment tracking folders
+
 .vscode/
 
 # Obsidian workspace layout and state tracking
+
 .obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Obsidian plugin runtime data
+
+.obsidian/plugins/*/data.json
 
 # Ignore any runtime log dumps if stored locally
+
 *.log
