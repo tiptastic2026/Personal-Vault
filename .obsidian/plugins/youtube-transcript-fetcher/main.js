@@ -47,6 +47,7 @@ __export(utils_exports, {
   sanitizeExternalMarkdown: () => sanitizeExternalMarkdown,
   sanitizeFilename: () => sanitizeFilename,
   sanitizeTagName: () => sanitizeTagName,
+  stripTrackingParams: () => stripTrackingParams,
   trimmedOrDefault: () => trimmedOrDefault,
   validateClaudeModelName: () => validateClaudeModelName,
   valueOrDefault: () => valueOrDefault
@@ -66,16 +67,27 @@ function extractVideoId(url) {
   }
   return null;
 }
-function extractAllVideoUrls(text) {
+function stripTrackingParams(url) {
+  if (!YOUTUBE_HOST_PATTERN.test(url)) return url;
+  const hashIndex = url.indexOf("#");
+  const hash = hashIndex === -1 ? "" : url.slice(hashIndex);
+  const withoutHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
+  const queryIndex = withoutHash.indexOf("?");
+  if (queryIndex === -1) return url;
+  const base = withoutHash.slice(0, queryIndex);
+  const kept = withoutHash.slice(queryIndex + 1).split("&").filter((param) => YOUTUBE_URL_PARAMS.has(param.split("=")[0]));
+  return `${base}${kept.length > 0 ? `?${kept.join("&")}` : ""}${hash}`;
+}
+function extractAllVideoUrls(text, removeTrackingParams = true) {
   const seen = /* @__PURE__ */ new Set();
   const urls = [];
   for (const token of text.split(/\s+/)) {
-    const trimmed = token.trim();
-    if (!trimmed) continue;
-    const videoId = extractVideoId(trimmed);
+    const cleaned = removeTrackingParams ? stripTrackingParams(token.trim()) : token.trim();
+    if (!cleaned) continue;
+    const videoId = extractVideoId(cleaned);
     if (videoId && !seen.has(videoId)) {
       seen.add(videoId);
-      urls.push(trimmed);
+      urls.push(cleaned);
     }
   }
   return urls;
@@ -165,8 +177,11 @@ function formatTimestamp(seconds, videoUrl, videoId, localVideoDirectory) {
   }
   return `[${timeString}](${timestampUrl})`;
 }
+var YOUTUBE_URL_PARAMS, YOUTUBE_HOST_PATTERN;
 var init_utils = __esm({
   "src/utils.ts"() {
+    YOUTUBE_URL_PARAMS = /* @__PURE__ */ new Set(["v", "t", "start", "list", "index"]);
+    YOUTUBE_HOST_PATTERN = /^(?:[a-z]+:\/\/)?(?:(?:www\.|m\.|mobile\.|music\.)?youtube\.com|youtu\.be)\//i;
   }
 });
 
@@ -271,7 +286,19 @@ function buildFrontmatterLines(values, fields) {
 }
 
 // src/settings.ts
-var DEFAULT_PROMPT = `Please process the following YouTube video transcript. Your task is to:
+var DEFAULT_PROMPT = `Please clean up the following YouTube video transcript. It was generated automatically from speech, so it may lack punctuation, capitalization, and paragraph breaks, and it may contain misheard words.
+
+Your task is to:
+
+1. Keep the speaker's own words and phrasing. Do NOT paraphrase, summarize, condense, or reorder anything: every sentence, point, example, and explanation must remain in your output.
+2. Add punctuation, capitalization, and paragraph breaks.
+3. Fix obvious transcription errors (misheard words, misspelled names).
+4. Remove filler words (e.g., "um", "uh") and false starts, but nothing else.
+5. Remove self-promotion, calls to action, and promotional content (e.g., "like and subscribe", "check out my channel", "visit my website").
+
+The result should read like an edited transcript of what was said, not like an article about it. Return only the cleaned transcript without any additional commentary or explanation.`;
+var LEGACY_DEFAULT_PROMPTS = [
+  `Please process the following YouTube video transcript. Your task is to:
 
 1. Create an accurate and complete transcription with complete sentences
 2. Remove all self-promotion, calls to action, and promotional content (e.g., "like and subscribe", "check out my channel", "visit my website", etc.)
@@ -279,7 +306,16 @@ var DEFAULT_PROMPT = `Please process the following YouTube video transcript. You
 4. Ensure proper grammar and sentence structure
 5. Keep the content focused on the actual video content
 
-Return only the cleaned transcript without any additional commentary or explanation.`;
+Return only the cleaned transcript without any additional commentary or explanation.`
+];
+function normalizeSavedPrompt(prompt) {
+  if (!prompt || prompt.trim() === "") return DEFAULT_PROMPT;
+  const trimmed = prompt.trim();
+  if (LEGACY_DEFAULT_PROMPTS.some((legacy) => legacy.trim() === trimmed)) {
+    return DEFAULT_PROMPT;
+  }
+  return prompt;
+}
 var DEFAULT_SETTINGS = {
   useLLMProcessing: false,
   // Default to false - use raw transcript by default
@@ -323,6 +359,10 @@ var DEFAULT_SETTINGS = {
   // Default to empty string - use video title as subfolder name
   defaultSrtFileName: "{VideoName}",
   // Default to video title
+  srtUseReadingSpeed: false,
+  // Default to false - use actual transcript segment timing
+  srtReadingSpeedWpm: 180,
+  // Default reading speed of 180 words per minute
   coverNoteTemplate: "",
   // Default to empty string - use default template
   defaultCoverNoteName: "{VideoName}",
@@ -341,6 +381,8 @@ var DEFAULT_SETTINGS = {
   // Default to "url" - the property the plugin writes by default
   allowClipboardAccess: true,
   // Default to true - enable clipboard prefill and clipboard command
+  removeTrackingParams: true,
+  // Default to true - strip tracking parameters from pasted and clipboard URLs
   frontmatterFields: DEFAULT_FRONTMATTER_FIELDS
   // Default to all fields enabled with their historical key names
 };
@@ -696,6 +738,15 @@ function getLanguageName(languageCode) {
   };
   return languageNames[languageCode.toLowerCase()] || languageCode.toUpperCase();
 }
+function getLanguageRequirement(forceLLMLanguage, transcriptLanguageCode) {
+  if (!forceLLMLanguage || !transcriptLanguageCode || transcriptLanguageCode.trim() === "") {
+    return "";
+  }
+  const languageName = getLanguageName(transcriptLanguageCode);
+  return `
+
+CRITICAL LANGUAGE REQUIREMENT: The transcript you are processing is in ${languageName} (language code: ${transcriptLanguageCode.toUpperCase()}). You MUST output your processed transcript and summary (if requested) in the SAME LANGUAGE (${languageName}). Do not translate or convert the content to any other language. Maintain the original language throughout your entire response.`;
+}
 function buildPrompt(basePrompt, transcript, generateSummary, includeTimestampsInLLM, forceLLMLanguage, transcriptLanguageCode) {
   let fullPrompt = basePrompt;
   if (generateSummary) {
@@ -725,21 +776,293 @@ Please format your response as follows:
     fullPrompt += `- Start with a "## Transcript" markdown header followed by the processed transcript
 `;
   }
+  fullPrompt += `
+
+IMPORTANT: The transcript section must cover the ENTIRE transcript from beginning to end. Do NOT summarize, shorten, or skip any of its content.`;
   if (includeTimestampsInLLM) {
     fullPrompt += `
 
 IMPORTANT: The transcript contains timestamp links in the format [MM:SS](url). You MUST preserve these timestamp links exactly as they appear in the original transcript. Do not remove, modify, or reformat them.`;
   }
-  if (forceLLMLanguage && transcriptLanguageCode && transcriptLanguageCode.trim() !== "") {
-    const languageName = getLanguageName(transcriptLanguageCode);
-    fullPrompt += `
-
-CRITICAL LANGUAGE REQUIREMENT: The transcript you are processing is in ${languageName} (language code: ${transcriptLanguageCode.toUpperCase()}). You MUST output your processed transcript and summary (if requested) in the SAME LANGUAGE (${languageName}). Do not translate or convert the content to any other language. Maintain the original language throughout your entire response.`;
-  }
+  fullPrompt += getLanguageRequirement(forceLLMLanguage, transcriptLanguageCode);
   fullPrompt += `
 Transcript:
 ${transcript}`;
   return fullPrompt;
+}
+
+// src/llm/chunking.ts
+var DEFAULT_CHUNK_SIZE = 12e3;
+var MIN_SPLIT_SIZE = 1e3;
+var MAX_SUMMARY_INPUT = 2e5;
+var PREVIOUS_TAIL_LENGTH = 600;
+var MAX_OUTLINE_HEADINGS = 40;
+var HEADING_PATTERN = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+function createChunkedProcessingState() {
+  return { chunkResults: /* @__PURE__ */ new Map(), summary: null };
+}
+function splitTranscriptIntoChunks(transcript, maxChars) {
+  const chunks = [];
+  let remaining = transcript.trim();
+  while (remaining.length > maxChars) {
+    const window2 = remaining.substring(0, maxChars + 1);
+    const minCut = Math.floor(maxChars / 2);
+    let cut = findLastBreak(window2, /\n/g, minCut);
+    if (cut === -1) cut = findLastBreak(window2, /[.!?]["')\]]*\s/g, minCut);
+    if (cut === -1) cut = findLastBreak(window2, /\s/g, minCut);
+    if (cut === -1) cut = maxChars;
+    const chunk = remaining.substring(0, cut).trim();
+    if (chunk) chunks.push(chunk);
+    remaining = remaining.substring(cut).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+function splitInTwo(text) {
+  return splitTranscriptIntoChunks(
+    text,
+    Math.max(MIN_SPLIT_SIZE, Math.ceil(text.length * 0.6))
+  );
+}
+function findLastBreak(text, pattern, minIndex) {
+  let result = -1;
+  for (const match of text.matchAll(pattern)) {
+    const end = match.index + match[0].length;
+    if (end >= minIndex && end <= text.length - 1) result = end;
+  }
+  return result;
+}
+function buildChunkPrompt(basePrompt, chunk, partNumber, totalParts, includeTimestampsInLLM, forceLLMLanguage, transcriptLanguageCode, context) {
+  let prompt = basePrompt;
+  prompt += `
+
+IMPORTANT: The transcript is long and has been split into ${totalParts} parts. This is part ${partNumber} of ${totalParts}.`;
+  prompt += ` Process ONLY this part and return the COMPLETE processed text for all of it. Do NOT summarize, shorten, or skip any content.`;
+  prompt += ` Do NOT add a summary, a "## Transcript" or "## Summary" heading, an introduction, or closing remarks: output only the processed transcript text for this part, so it can be joined seamlessly with the other parts.`;
+  if (partNumber > 1) {
+    prompt += ` This part continues directly from the previous part and may begin mid-sentence; continue naturally without re-introducing the topic.`;
+  }
+  if (context && (context.headings.length > 0 || context.previousTail)) {
+    prompt += `
+
+DOCUMENT STRUCTURE: Your output is appended to the output of the previous parts, so it must read as one continuous document.`;
+    prompt += ` Do NOT add a document title and do NOT repeat headings that were already used.`;
+    prompt += ` If this part begins by continuing the last section, continue it without a new heading. Add a heading only where a new topic begins, and use the same heading levels as the earlier parts for sections and sub-sections of the same kind.`;
+    if (context.headings.length > 0) {
+      prompt += `
+
+Headings used so far, in order:
+${context.headings.join("\n")}`;
+    }
+    if (context.previousTail) {
+      prompt += `
+
+The previous part's processed text ends with:
+"""
+${context.previousTail}
+"""`;
+    }
+  }
+  if (includeTimestampsInLLM) {
+    prompt += `
+
+IMPORTANT: The transcript contains timestamp links in the format [MM:SS](url). You MUST preserve these timestamp links exactly as they appear in the original transcript. Do not remove, modify, or reformat them.`;
+  }
+  prompt += getLanguageRequirement(forceLLMLanguage, transcriptLanguageCode);
+  prompt += `
+Transcript (part ${partNumber} of ${totalParts}):
+${chunk}`;
+  return prompt;
+}
+function buildSummaryPrompt(transcript, forceLLMLanguage, transcriptLanguageCode) {
+  let prompt = `Write a concise summary (2-3 sentences) of the following YouTube video transcript, focusing on the main topics, key points, and overall message.`;
+  prompt += ` Respond with only the summary text: no heading, introduction, or other commentary.`;
+  prompt += getLanguageRequirement(forceLLMLanguage, transcriptLanguageCode);
+  prompt += `
+Transcript:
+${transcript}`;
+  return prompt;
+}
+function buildPartContext(previousOutputs, base) {
+  var _a;
+  const text = previousOutputs.filter((o) => o.length > 0).join("\n\n");
+  if (!text) return base != null ? base : { headings: [], previousTail: "" };
+  const headings = [
+    ...(_a = base == null ? void 0 : base.headings) != null ? _a : [],
+    ...extractHeadings(text).map((h) => h.line)
+  ];
+  const previousTail = text.length > PREVIOUS_TAIL_LENGTH ? text.substring(text.length - PREVIOUS_TAIL_LENGTH).replace(/^\S*\s+/, "") : text;
+  return {
+    headings: headings.slice(-MAX_OUTLINE_HEADINGS),
+    previousTail: previousTail.trim()
+  };
+}
+function extractHeadings(text) {
+  const headings = [];
+  for (const line of text.split("\n")) {
+    const match = line.match(HEADING_PATTERN);
+    if (match) {
+      headings.push({ line: line.trim(), level: match[1].length, text: match[2] });
+    }
+  }
+  return headings;
+}
+function normalizeHeadingText(text) {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+function joinProcessedParts(parts) {
+  let joined = "";
+  for (const rawPart of parts) {
+    let part = rawPart.trim();
+    if (!part) continue;
+    if (joined) {
+      part = part.replace(/^#(?=\s)/gm, "##");
+      const lastHeading = extractHeadings(joined).pop();
+      const firstLine = part.split("\n", 1)[0];
+      const opening = firstLine.match(HEADING_PATTERN);
+      if (lastHeading && opening && normalizeHeadingText(opening[2]) === normalizeHeadingText(lastHeading.text)) {
+        part = part.substring(firstLine.length).trim();
+      }
+    }
+    if (part) joined = joined ? `${joined}
+
+${part}` : part;
+  }
+  return joined;
+}
+function cleanChunkOutput(text) {
+  return text.trim().replace(/^#{1,6}\s+Transcript\s*\n+/i, "").trim();
+}
+function stripSummaryHeading(text) {
+  return text.trim().replace(/^#{1,6}\s+Summary\s*\n+/i, "").trim();
+}
+async function processTranscriptInChunks(options) {
+  var _a, _b;
+  const {
+    transcript,
+    basePrompt,
+    generateSummary,
+    providerName,
+    complete,
+    statusCallback
+  } = options;
+  const chunkSize = (_a = options.chunkSize) != null ? _a : DEFAULT_CHUNK_SIZE;
+  const state = (_b = options.state) != null ? _b : createChunkedProcessingState();
+  let chunks = splitTranscriptIntoChunks(transcript, chunkSize);
+  if (chunks.length <= 1 && state.chunkResults.size === 0) {
+    const result = await complete(
+      buildPrompt(
+        basePrompt,
+        transcript,
+        generateSummary,
+        options.includeTimestampsInLLM,
+        options.forceLLMLanguage,
+        options.transcriptLanguageCode
+      )
+    );
+    if (!result.truncated) return result.text;
+    console.warn(
+      `${providerName} response was truncated; reprocessing transcript in smaller parts`
+    );
+    chunks = splitInTwo(transcript);
+  } else if (chunks.length <= 1) {
+    chunks = splitInTwo(transcript);
+  }
+  const total = chunks.length;
+  const processed = [];
+  for (let i = 0; i < total; i++) {
+    let output = state.chunkResults.get(i);
+    if (output === void 0) {
+      if (statusCallback) {
+        statusCallback(
+          `Processing transcript with ${providerName} (part ${i + 1} of ${total})...`
+        );
+      }
+      output = await processChunk(
+        options,
+        chunks[i],
+        i + 1,
+        total,
+        buildPartContext(processed)
+      );
+      state.chunkResults.set(i, output);
+    }
+    processed.push(output);
+  }
+  const joinedTranscript = joinProcessedParts(processed);
+  if (!generateSummary) {
+    return `## Transcript
+
+${joinedTranscript}`;
+  }
+  if (state.summary === null) {
+    if (statusCallback) {
+      statusCallback(`Generating summary with ${providerName}...`);
+    }
+    state.summary = await summarize(options, transcript);
+  }
+  return `## Summary
+
+${state.summary}
+
+## Transcript
+
+${joinedTranscript}`;
+}
+async function processChunk(options, chunk, partNumber, totalParts, context) {
+  const result = await options.complete(
+    buildChunkPrompt(
+      options.basePrompt,
+      chunk,
+      partNumber,
+      totalParts,
+      options.includeTimestampsInLLM,
+      options.forceLLMLanguage,
+      options.transcriptLanguageCode,
+      context
+    )
+  );
+  if (!result.truncated) return cleanChunkOutput(result.text);
+  if (chunk.length < MIN_SPLIT_SIZE * 2) {
+    console.warn(
+      `${options.providerName} response for part ${partNumber} of ${totalParts} was truncated and the part is too small to split further`
+    );
+    return cleanChunkOutput(result.text);
+  }
+  const halves = splitInTwo(chunk);
+  const outputs = [];
+  for (const half of halves) {
+    const halfContext = buildPartContext(outputs, context);
+    outputs.push(
+      await processChunk(options, half, partNumber, totalParts, halfContext)
+    );
+  }
+  return joinProcessedParts(outputs);
+}
+async function summarize(options, transcript) {
+  const { complete, forceLLMLanguage, transcriptLanguageCode } = options;
+  if (transcript.length <= MAX_SUMMARY_INPUT) {
+    const result2 = await complete(
+      buildSummaryPrompt(transcript, forceLLMLanguage, transcriptLanguageCode)
+    );
+    return stripSummaryHeading(result2.text);
+  }
+  const sections = splitTranscriptIntoChunks(transcript, MAX_SUMMARY_INPUT);
+  const partialSummaries = [];
+  for (const section of sections) {
+    const result2 = await complete(
+      buildSummaryPrompt(section, forceLLMLanguage, transcriptLanguageCode)
+    );
+    partialSummaries.push(stripSummaryHeading(result2.text));
+  }
+  const result = await complete(
+    buildSummaryPrompt(
+      partialSummaries.join("\n\n"),
+      forceLLMLanguage,
+      transcriptLanguageCode
+    )
+  );
+  return stripSummaryHeading(result.text);
 }
 
 // src/llm/openai.ts
@@ -768,16 +1091,9 @@ async function processWithOpenAI(app, transcript, generateSummary, settings, sta
   console.debug("processWithOpenAI: generateSummary =", generateSummary);
   if (statusCallback) statusCallback(getProcessingStatusMessage("OpenAI"));
   const prompt = settings.prompt || DEFAULT_SETTINGS.prompt;
-  const fullPrompt = buildPrompt(
-    prompt,
-    transcript,
-    generateSummary,
-    settings.includeTimestampsInLLM || false,
-    settings.forceLLMLanguage || false,
-    transcriptLanguageCode
-  );
-  const makeRequest = async () => {
-    var _a, _b, _c, _d, _e;
+  const chunkState = createChunkedProcessingState();
+  const requestCompletion = async (fullPrompt) => {
+    var _a, _b, _c, _d, _e, _f, _g;
     const timeoutMinutes = settings.openaiTimeout || 1;
     const timeoutMs = timeoutMinutes * 60 * 1e3;
     const timeoutPromise = new Promise((_, reject) => {
@@ -842,7 +1158,21 @@ async function processWithOpenAI(app, transcript, generateSummary, settings, sta
       if (statusCallback) statusCallback(null);
       throw new Error("No response from OpenAI");
     }
-    const responseContent = rawContent;
+    return { text: rawContent.trim(), truncated: ((_g = (_f = data.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.finish_reason) === "length" };
+  };
+  const makeRequest = async () => {
+    const responseContent = await processTranscriptInChunks({
+      transcript,
+      basePrompt: prompt,
+      generateSummary,
+      includeTimestampsInLLM: settings.includeTimestampsInLLM || false,
+      forceLLMLanguage: settings.forceLLMLanguage || false,
+      transcriptLanguageCode,
+      providerName: "OpenAI",
+      complete: requestCompletion,
+      statusCallback,
+      state: chunkState
+    });
     return parseLLMResponse(responseContent.trim(), generateSummary);
   };
   try {
@@ -953,16 +1283,9 @@ async function processWithGemini(app, transcript, generateSummary, settings, sta
   console.debug("processWithGemini: generateSummary =", generateSummary);
   if (statusCallback) statusCallback(getProcessingStatusMessage("Gemini"));
   const prompt = settings.prompt || DEFAULT_SETTINGS.prompt;
-  const fullPrompt = buildPrompt(
-    prompt,
-    transcript,
-    generateSummary,
-    settings.includeTimestampsInLLM || false,
-    settings.forceLLMLanguage || false,
-    transcriptLanguageCode
-  );
-  const makeRequest = async () => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
+  const chunkState = createChunkedProcessingState();
+  const requestCompletion = async (fullPrompt) => {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
     const timeoutMinutes = settings.openaiTimeout || 1;
     const timeoutMs = timeoutMinutes * 60 * 1e3;
     const timeoutPromise = new Promise((_, reject) => {
@@ -1038,12 +1361,29 @@ async function processWithGemini(app, transcript, generateSummary, settings, sta
       throw new Error(errorMsg);
     }
     const data = response.json;
-    const rawContent = (_j = (_i = (_h = (_g = (_f = data.candidates) == null ? void 0 : _f[0]) == null ? void 0 : _g.content) == null ? void 0 : _h.parts) == null ? void 0 : _i[0]) == null ? void 0 : _j.text;
+    const rawContent = (_i = (_h = (_g = (_f = data.candidates) == null ? void 0 : _f[0]) == null ? void 0 : _g.content) == null ? void 0 : _h.parts) == null ? void 0 : _i.map((part) => {
+      var _a2;
+      return (_a2 = part.text) != null ? _a2 : "";
+    }).join("");
     if (!rawContent) {
       if (statusCallback) statusCallback(null);
       throw new Error("No response from Gemini");
     }
-    const responseContent = rawContent;
+    return { text: rawContent.trim(), truncated: ((_k = (_j = data.candidates) == null ? void 0 : _j[0]) == null ? void 0 : _k.finishReason) === "MAX_TOKENS" };
+  };
+  const makeRequest = async () => {
+    const responseContent = await processTranscriptInChunks({
+      transcript,
+      basePrompt: prompt,
+      generateSummary,
+      includeTimestampsInLLM: settings.includeTimestampsInLLM || false,
+      forceLLMLanguage: settings.forceLLMLanguage || false,
+      transcriptLanguageCode,
+      providerName: "Gemini",
+      complete: requestCompletion,
+      statusCallback,
+      state: chunkState
+    });
     return parseLLMResponse(responseContent.trim(), generateSummary);
   };
   try {
@@ -1155,15 +1495,8 @@ async function processWithClaude(app, transcript, generateSummary, settings, sta
   console.debug("processWithClaude: generateSummary =", generateSummary);
   if (statusCallback) statusCallback(getProcessingStatusMessage("Claude"));
   const prompt = settings.prompt || DEFAULT_SETTINGS.prompt;
-  const fullPrompt = buildPrompt(
-    prompt,
-    transcript,
-    generateSummary,
-    settings.includeTimestampsInLLM || false,
-    settings.forceLLMLanguage || false,
-    transcriptLanguageCode
-  );
-  const makeRequest = async () => {
+  const chunkState = createChunkedProcessingState();
+  const requestCompletion = async (fullPrompt) => {
     var _a, _b, _c, _d, _e, _f, _g;
     const timeoutMinutes = settings.openaiTimeout || 1;
     const timeoutMs = timeoutMinutes * 60 * 1e3;
@@ -1195,7 +1528,7 @@ async function processWithClaude(app, transcript, generateSummary, settings, sta
       },
       body: JSON.stringify({
         model,
-        max_tokens: 4096,
+        max_tokens: getClaudeMaxOutputTokens(model),
         messages: [
           {
             role: "user",
@@ -1245,7 +1578,21 @@ async function processWithClaude(app, transcript, generateSummary, settings, sta
       if (statusCallback) statusCallback(null);
       throw new Error("No response from Claude");
     }
-    const responseContent = rawContent;
+    return { text: rawContent.trim(), truncated: data.stop_reason === "max_tokens" };
+  };
+  const makeRequest = async () => {
+    const responseContent = await processTranscriptInChunks({
+      transcript,
+      basePrompt: prompt,
+      generateSummary,
+      includeTimestampsInLLM: settings.includeTimestampsInLLM || false,
+      forceLLMLanguage: settings.forceLLMLanguage || false,
+      transcriptLanguageCode,
+      providerName: "Claude",
+      complete: requestCompletion,
+      statusCallback,
+      state: chunkState
+    });
     return parseLLMResponse(responseContent.trim(), generateSummary);
   };
   try {
@@ -1336,6 +1683,11 @@ async function processWithClaude(app, transcript, generateSummary, settings, sta
     throw new Error(errorMsg);
   }
 }
+function getClaudeMaxOutputTokens(model) {
+  if (/^claude-3-(haiku|sonnet|opus)-/.test(model)) return 4096;
+  if (/^claude-3-5-/.test(model)) return 8192;
+  return 16e3;
+}
 
 // src/llm/custom.ts
 var import_obsidian5 = require("obsidian");
@@ -1351,17 +1703,10 @@ async function processWithCustomProvider(app, transcript, generateSummary, setti
   }
   console.debug("processWithCustomProvider: generateSummary =", generateSummary);
   if (statusCallback) statusCallback(getProcessingStatusMessage(provider.name));
-  const prompt = settings.prompt;
-  const fullPrompt = buildPrompt(
-    prompt,
-    transcript,
-    generateSummary,
-    settings.includeTimestampsInLLM || false,
-    settings.forceLLMLanguage || false,
-    transcriptLanguageCode
-  );
-  const makeRequest = async () => {
-    var _a, _b, _c, _d, _e;
+  const prompt = settings.prompt || DEFAULT_SETTINGS.prompt;
+  const chunkState = createChunkedProcessingState();
+  const requestCompletion = async (fullPrompt) => {
+    var _a, _b, _c, _d, _e, _f, _g;
     const timeoutMinutes = provider.timeout || 1;
     const timeoutMs = timeoutMinutes * 60 * 1e3;
     const timeoutPromise = new Promise((_, reject) => {
@@ -1429,7 +1774,21 @@ async function processWithCustomProvider(app, transcript, generateSummary, setti
       if (statusCallback) statusCallback(null);
       throw new Error(`No response from ${provider.name}`);
     }
-    const responseContent = rawContent;
+    return { text: rawContent.trim(), truncated: ((_g = (_f = data.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.finish_reason) === "length" };
+  };
+  const makeRequest = async () => {
+    const responseContent = await processTranscriptInChunks({
+      transcript,
+      basePrompt: prompt,
+      generateSummary,
+      includeTimestampsInLLM: settings.includeTimestampsInLLM || false,
+      forceLLMLanguage: settings.forceLLMLanguage || false,
+      transcriptLanguageCode,
+      providerName: provider.name,
+      complete: requestCompletion,
+      statusCallback,
+      state: chunkState
+    });
     return parseLLMResponse(responseContent.trim(), generateSummary);
   };
   try {
@@ -2401,6 +2760,7 @@ async function generatePdfFromMarkdown(app, markdown) {
 }
 
 // src/srtFormatter.ts
+var MIN_READING_DURATION_SECONDS = 1;
 function formatSrtTime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor(seconds % 3600 / 60);
@@ -2408,15 +2768,26 @@ function formatSrtTime(seconds) {
   const ms = Math.round(seconds % 1 * 1e3);
   return h.toString().padStart(2, "0") + ":" + m.toString().padStart(2, "0") + ":" + s.toString().padStart(2, "0") + "," + ms.toString().padStart(3, "0");
 }
-function generateSrt(segments) {
+function generateSrt(segments, options) {
+  const wpm = (options == null ? void 0 : options.readingSpeedWpm) && options.readingSpeedWpm > 0 ? options.readingSpeedWpm : void 0;
   const validSegments = segments.filter((seg) => seg.startTime >= 0);
   return validSegments.map((seg, i) => {
     const start = seg.startTime;
+    const next = validSegments[i + 1];
     let end;
-    if (seg.duration !== void 0 && seg.duration > 0) {
+    if (wpm) {
+      const wordCount = seg.text.trim().split(/\s+/).filter(Boolean).length;
+      const readingDuration = wordCount / wpm * 60;
+      end = start + Math.max(readingDuration, MIN_READING_DURATION_SECONDS);
+      if (next && end > next.startTime) {
+        end = next.startTime;
+      }
+    } else if (seg.duration !== void 0 && seg.duration > 0) {
       end = start + seg.duration;
+      if (next && end > next.startTime) {
+        end = next.startTime;
+      }
     } else {
-      const next = validSegments[i + 1];
       end = next ? next.startTime : start + 5;
     }
     return `${i + 1}
@@ -2459,8 +2830,8 @@ var SRTHandler = class {
   constructor() {
     this.extension = "srt";
   }
-  async createFile(app, filePath, _markdownContent, segments) {
-    await app.vault.create(filePath, generateSrt(segments));
+  async createFile(app, filePath, _markdownContent, segments, options) {
+    await app.vault.create(filePath, generateSrt(segments, options == null ? void 0 : options.srt));
   }
   async postCreate(_app, filePath) {
     new import_obsidian8.Notice(`SRT file created: ${filePath}`);
@@ -2705,21 +3076,43 @@ var YouTubeUrlModal = class extends import_obsidian10.Modal {
         });
       }, 500);
     });
+    const cleanUrl = (text) => {
+      var _a2;
+      return ((_a2 = this.settings.removeTrackingParams) != null ? _a2 : true) ? stripTrackingParams(text) : text;
+    };
+    input.addEventListener("paste", (event) => {
+      var _a2, _b2, _c2, _d, _e;
+      if (!((_a2 = this.settings.removeTrackingParams) != null ? _a2 : true)) {
+        return;
+      }
+      const pastedUrl = stripTrackingParams((_c2 = (_b2 = event.clipboardData) == null ? void 0 : _b2.getData("text/plain").trim()) != null ? _c2 : "");
+      if (!pastedUrl || !extractVideoId(pastedUrl)) {
+        return;
+      }
+      event.preventDefault();
+      input.setRangeText(
+        pastedUrl,
+        (_d = input.selectionStart) != null ? _d : input.value.length,
+        (_e = input.selectionEnd) != null ? _e : input.value.length,
+        "end"
+      );
+      input.dispatchEvent(new Event("input"));
+    });
     let prefilledUrl = false;
     const activeView = this.app.workspace.getActiveViewOfType(import_obsidian10.MarkdownView);
     if (activeView == null ? void 0 : activeView.editor) {
-      const selectedText = activeView.editor.getSelection();
-      if (selectedText && extractVideoId(selectedText.trim())) {
-        input.value = selectedText.trim();
+      const selectedUrl = cleanUrl(activeView.editor.getSelection().trim());
+      if (selectedUrl && extractVideoId(selectedUrl)) {
+        input.value = selectedUrl;
         input.select();
         prefilledUrl = true;
       }
     }
     if (!prefilledUrl && ((_a = this.settings.allowClipboardAccess) != null ? _a : true)) {
       try {
-        const clipboardText = await navigator.clipboard.readText();
-        if (clipboardText && extractVideoId(clipboardText.trim())) {
-          input.value = clipboardText.trim();
+        const clipboardUrl = cleanUrl((await navigator.clipboard.readText()).trim());
+        if (clipboardUrl && extractVideoId(clipboardUrl)) {
+          input.value = clipboardUrl;
           input.select();
           prefilledUrl = true;
         }
@@ -3581,7 +3974,7 @@ var YouTubeTranscriptSettingTab = class extends import_obsidian19.PluginSettingT
     }
     settings[key] = value;
     await this.saveSettings();
-    if (key === "useLLMProcessing" || key === "llmProvider" || key === "savedDirectories" || key === "defaultDirectory" || key === "customProviders") {
+    if (key === "useLLMProcessing" || key === "llmProvider" || key === "savedDirectories" || key === "defaultDirectory" || key === "customProviders" || key === "srtUseReadingSpeed") {
       this.update();
     } else {
       this.refreshDomState();
@@ -3660,6 +4053,7 @@ var YouTubeTranscriptSettingTab = class extends import_obsidian19.PluginSettingT
           { name: "Tag with channel name", desc: "When enabled, notes will be tagged with the YouTube channel name (can be overridden in the modal)", control: { type: "toggle", key: "tagWithChannelName" } },
           { name: "Single line transcript", desc: "When enabled, the transcript will be kept on a single line without line breaks. Timestamps (if enabled) will be inline. Useful for compact formatting or when copying to other applications.", control: { type: "toggle", key: "singleLineTranscript" } },
           { name: "Allow clipboard access", desc: 'When enabled, the plugin reads the clipboard to prefill the URL field when the modal opens, and powers the "Fetch from clipboard" command. Disable if you prefer the plugin never accesses the clipboard.', control: { type: "toggle", key: "allowClipboardAccess" } },
+          { name: "Remove tracking parameters", desc: "When enabled, tracking parameters such as si, feature and utm_* are removed from YouTube URLs pasted into the URL field or read from the clipboard. The video, playlist and timestamp are kept.", control: { type: "toggle", key: "removeTrackingParams" } },
           { name: "Prevent duplicate notes", desc: "When enabled, creating a transcript will be blocked if a note already exists with a matching value in the frontmatter property below", control: { type: "toggle", key: "checkForDuplicates" } },
           { name: "Duplicate check property", desc: 'The frontmatter property used to detect duplicates. Defaults to "url", which the plugin writes automatically.', control: { type: "text", key: "duplicateCheckProperty", placeholder: "url" } }
         ]
@@ -3700,6 +4094,13 @@ var YouTubeTranscriptSettingTab = class extends import_obsidian19.PluginSettingT
           },
           { name: "Attachment folder", desc: "Folder name used to nest PDF and SRT files under the cover note location. Leave empty to use the video title as the folder name.", control: { type: "text", key: "attachmentFolder", placeholder: "attachments" } },
           { name: "Default SRT file name", desc: "Template for SRT file names. Supports {VideoName} and {ChannelName} variables.", control: { type: "text", key: "defaultSrtFileName", placeholder: "{VideoName}" } },
+          { name: "Use reading speed for SRT timing", desc: "When enabled, each SRT cue's duration is computed from its word count at the reading speed below, instead of the actual transcript segment timing.", control: { type: "toggle", key: "srtUseReadingSpeed" } },
+          {
+            name: "SRT reading speed (WPM)",
+            desc: "Words per minute used to compute SRT cue duration when reading-speed timing is enabled.",
+            visible: () => this.settings.srtUseReadingSpeed,
+            control: { type: "number", key: "srtReadingSpeedWpm", placeholder: "180", min: 1, defaultValue: 180 }
+          },
           {
             name: "Cover note template",
             desc: "Path to a markdown template file for cover notes. Leave empty to use the default template. Supports template variables: {ChannelName}, {VideoName}, {VideoUrl}, {Summary}, {PdfLink}, {SrtLink}, {VideoId}, {LengthSeconds}, {ViewCount}, {PublishDate}, {Description}, {ChannelId}, {IsLive}, {IsPrivate}, {IsUnlisted}, and {VideoDetails.*} for any videoDetails field.",
@@ -4261,7 +4662,7 @@ var YouTubeTranscriptPlugin = class extends import_obsidian21.Plugin {
   }
   async onload() {
     await this.loadSettings();
-    this.addRibbonIcon("youtube", "YouTube transcript", () => {
+    this.addRibbonIcon("closed-caption", "YouTube transcript", () => {
       this.fetchTranscript();
     });
     this.addSettingTab(
@@ -4321,8 +4722,9 @@ var YouTubeTranscriptPlugin = class extends import_obsidian21.Plugin {
       this.settings.claudeModel = this.settings.claudeModel.includes("opus") ? "claude-opus-4-20250514" : DEFAULT_SETTINGS.claudeModel;
       changed = true;
     }
-    if (!this.settings.prompt || this.settings.prompt.trim() === "") {
-      this.settings.prompt = DEFAULT_PROMPT;
+    const prompt = normalizeSavedPrompt(this.settings.prompt);
+    if (prompt !== this.settings.prompt) {
+      this.settings.prompt = prompt;
       changed = true;
     }
     if (!this.settings.openaiTimeout || this.settings.openaiTimeout <= 0) {
@@ -4425,7 +4827,7 @@ var YouTubeTranscriptPlugin = class extends import_obsidian21.Plugin {
     ).open();
   }
   async fetchTranscriptFromClipboard() {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f;
     if (!((_a = this.settings.allowClipboardAccess) != null ? _a : true)) {
       new import_obsidian21.Notice("Clipboard access is disabled. Enable it in settings \u2192 YouTube transcript settings.", 1e4);
       return;
@@ -4437,15 +4839,15 @@ var YouTubeTranscriptPlugin = class extends import_obsidian21.Plugin {
         return;
       }
       const { extractAllVideoUrls: extractAllVideoUrls2 } = await Promise.resolve().then(() => (init_utils(), utils_exports));
-      const urls = extractAllVideoUrls2(clipboardText);
+      const urls = extractAllVideoUrls2(clipboardText, (_b = this.settings.removeTrackingParams) != null ? _b : true);
       if (urls.length === 0) {
         new import_obsidian21.Notice("No YouTube URLs found in clipboard. Please copy a valid YouTube URL or video ID.", 1e4);
         return;
       }
-      let createNewFile = (_b = this.settings.createNewFile) != null ? _b : false;
-      const includeVideoUrl = (_c = this.settings.includeVideoUrl) != null ? _c : false;
-      const generateSummary = (_d = this.settings.generateSummary) != null ? _d : false;
-      const tagWithChannelName = (_e = this.settings.tagWithChannelName) != null ? _e : false;
+      let createNewFile = (_c = this.settings.createNewFile) != null ? _c : false;
+      const includeVideoUrl = (_d = this.settings.includeVideoUrl) != null ? _d : false;
+      const generateSummary = (_e = this.settings.generateSummary) != null ? _e : false;
+      const tagWithChannelName = (_f = this.settings.tagWithChannelName) != null ? _f : false;
       const fileFormats = this.settings.fileFormats && this.settings.fileFormats.length > 0 ? this.settings.fileFormats : ["markdown"];
       if (fileFormats.includes("pdf") || fileFormats.includes("srt")) {
         createNewFile = true;
@@ -4763,8 +5165,13 @@ var YouTubeTranscriptPlugin = class extends import_obsidian21.Plugin {
     }
     parts.push(sanitizeExternalMarkdown(transcript));
     const markdownContent = parts.join("\n\n");
+    const formatOptions = {
+      srt: {
+        readingSpeedWpm: this.settings.srtUseReadingSpeed ? this.settings.srtReadingSpeedWpm : void 0
+      }
+    };
     try {
-      await handler.createFile(this.app, newFilePath, markdownContent, segments);
+      await handler.createFile(this.app, newFilePath, markdownContent, segments, formatOptions);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       if (errorMessage.includes("already exists") || errorMessage.includes("file exists")) {
@@ -4773,7 +5180,7 @@ var YouTubeTranscriptPlugin = class extends import_obsidian21.Plugin {
           newFilePath = `${baseName} (${counter}).${fileExtension}`;
           counter++;
         }
-        await handler.createFile(this.app, newFilePath, markdownContent, segments);
+        await handler.createFile(this.app, newFilePath, markdownContent, segments, formatOptions);
       } else {
         throw error;
       }
